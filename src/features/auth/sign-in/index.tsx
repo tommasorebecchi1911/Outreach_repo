@@ -1,4 +1,4 @@
-import { useSearch } from '@tanstack/react-router'
+import { Link, useSearch } from '@tanstack/react-router'
 import {
   Card,
   CardContent,
@@ -20,7 +20,13 @@ export function SignIn() {
           <CardTitle className='text-lg tracking-tight'>Sign in</CardTitle>
           <CardDescription>
             Enter your email and password below to <br />
-            log into your account
+            log into your account. Don&apos;t have an account?{' '}
+            <Link
+              to='/sign-up'
+              className='underline underline-offset-4 hover:text-primary'
+            >
+              Sign Up
+            </Link>
           </CardDescription>
         </CardHeader>
         <CardContent>

@@ -2,29 +2,74 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const OPENROUTER_API_KEY = Deno.env.get('OPENROUTER_API_KEY');
 const SERPER_API_KEY = Deno.env.get('SERPER_API_KEY');
+const TAVILY_API_KEY = Deno.env.get('TAVILY_API_KEY');
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+const DEFAULT_BATCH_SIZE = 5;
+const DEFAULT_MAX_BATCHES_PER_RUN = 20;
+const OPENROUTER_CONTACT_MODELS = [
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "google/gemma-3-12b-it:free",
+  "openai/gpt-4o-mini"
+];
+const OPENROUTER_EMAIL_MODELS = [
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "openai/gpt-4o-mini",
+  "google/gemma-3-12b-it:free"
+];
 const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Content-Type': 'application/json'
 };
-// FIX 6: cleanHtml preserva href con mailto e link prima di rimuovere i tag
-function cleanHtml(html) {
+type ChatMessage = {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+};
+type ContactInfo = {
+  info_utili: string;
+  contact_email: string;
+  partita_iva: string;
+  best_contact_url: string;
+};
+type EmailContent = {
+  oggetto: string;
+  corpo: string;
+};
+type SearchLookupResult = {
+  url: string;
+  snippet: string;
+};
+function toErrorMessage(value: unknown): string {
+  if (value instanceof Error) return value.message;
+  return String(value);
+}
+function getRequiredEnv(value: string | undefined, keyName: string): string {
+  if (!value) throw new Error(`Missing required env var: ${keyName}`);
+  return value;
+}
+function getOpenRouterApiKey(): string {
+  const key = getRequiredEnv(OPENROUTER_API_KEY, 'OPENROUTER_API_KEY').trim();
+  if (!key.startsWith('sk-or-')) {
+    throw new Error('OPENROUTER_API_KEY appears invalid. Expected key starting with "sk-or-"');
+  }
+  return key;
+}
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve)=>setTimeout(resolve, ms));
+}
+function cleanHtml(html: string): string {
   let text = html;
-  // Rimuove script e style con contenuto
   text = text.replace(new RegExp("<script[^>]*>[\\s\\S]*?<\\/script>", "gi"), "");
   text = text.replace(new RegExp("<style[^>]*>[\\s\\S]*?<\\/style>", "gi"), "");
   text = text.replace(new RegExp("<!--[\\s\\S]*?-->", "g"), "");
-  // Estrae e preserva i mailto: come testo leggibile dall'AI
   text = text.replace(new RegExp('href=["\']mailto:([^"\']+)["\']', "gi"), "EMAIL_TROVATA:$1");
-  // Estrae e preserva i link href come testo
   text = text.replace(new RegExp('href=["\']([^"\']+)["\']', "gi"), "LINK:$1");
-  // Rimuove tutti i tag rimanenti
   text = text.replace(new RegExp("<[^>]+>", "g"), " ");
-  // Normalizza spazi e tronca
   return text.replace(new RegExp("\\s+", "g"), " ").trim().substring(0, 15000);
 }
-// Helper: fetch con timeout
-async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(()=>controller.abort(), timeoutMs);
   try {
@@ -36,115 +81,354 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
     clearTimeout(timer);
   }
 }
-// Helper: chiamata OpenRouter con gestione errori
-async function callOpenRouter(model, messages) {
-  const res = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+function extractOpenRouterContent(content: unknown): string {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  const merged = content.map((chunk)=>{
+    if (typeof chunk !== 'object' || chunk === null) return '';
+    const value = Reflect.get(chunk, 'text');
+    return typeof value === 'string' ? value : '';
+  }).join('').trim();
+  return merged;
+}
+async function callOpenRouterSingle(model: string, messages: ChatMessage[]): Promise<string> {
+  const openRouterApiKey = getOpenRouterApiKey();
+  const response = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+      "Authorization": `Bearer ${openRouterApiKey}`,
+      "HTTP-Referer": SUPABASE_URL || "https://supabase.co",
+      "X-Title": "Outreach Processor",
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
       model,
       messages
     })
-  }, 20000 // 20s timeout per le chiamate AI
-  );
-  const json = await res.json();
-  if (!res.ok) throw new Error(`OpenRouter error: ${json.error?.message || JSON.stringify(json)}`);
-  const content = json.choices?.[0]?.message?.content;
-  if (!content) throw new Error("OpenRouter ha restituito una risposta vuota");
-  return content.trim();
-}
-// FIX 2+3: Helper per parsare il JSON restituito dall'AI in modo robusto
-function parseJsonFromAI(raw) {
-  // Rimuove eventuali blocchi ```json ... ``` che l'AI aggiunge spesso
-  const cleaned = raw.replace(new RegExp("```json|```", "g"), "").trim();
-  return JSON.parse(cleaned);
-}
-// FIX 5: serve riceve req (anche se non usata ora, è corretto per future estensioni)
-serve(async (_req)=>{
+  }, 25000);
+  const rawBody = await response.text();
+  let parsedBody: Record<string, unknown> | null = null;
   try {
-    const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    // Prendi batch tramite RPC (usa FOR UPDATE SKIP LOCKED internamente)
-    const { data: aziende, error: rpcError } = await supabaseAdmin.rpc('get_next_batch_aziende', {
-      batch_size: 5
-    });
-    if (rpcError) throw rpcError;
-    if (!aziende || aziende.length === 0) {
-      return new Response(JSON.stringify({
-        message: 'Coda vuota'
-      }), {
-        headers: corsHeaders
-      });
-    }
-    for (const azienda of aziende){
+    parsedBody = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch  {
+    parsedBody = null;
+  }
+  if (!response.ok) {
+    const parsedError = parsedBody && typeof parsedBody.error === 'object' && parsedBody.error !== null ? Reflect.get(parsedBody.error, 'message') : undefined;
+    const details = typeof parsedError === 'string' ? parsedError : rawBody;
+    throw new Error(`OpenRouter error (${model}, HTTP ${response.status}): ${details}`);
+  }
+  const choices = parsedBody && Array.isArray(parsedBody.choices) ? parsedBody.choices : [];
+  const firstChoice = choices.length > 0 && typeof choices[0] === 'object' && choices[0] !== null ? choices[0] : null;
+  const message = firstChoice ? Reflect.get(firstChoice, 'message') : null;
+  const content = message && typeof message === 'object' ? Reflect.get(message, 'content') : null;
+  if (!content) throw new Error("OpenRouter ha restituito una risposta vuota");
+  const extractedContent = extractOpenRouterContent(content);
+  if (!extractedContent) throw new Error(`OpenRouter content non supportato (${model})`);
+  return extractedContent;
+}
+async function callOpenRouter(models: string[], messages: ChatMessage[]): Promise<string> {
+  const errors: string[] = [];
+  for (const model of models){
+    for (let attempt = 1; attempt <= 2; attempt++){
       try {
-        console.log(`Processing: ${azienda.nome_azienda} (${azienda.partita_iva})`);
-        // --- CHECK CACHE ---
-        const { data: existingData } = await supabaseAdmin.from('aziende').select('website_url, search_query_generated, dati_contatto_raw, email_target, email_generata_oggetto, email_generata_corpo').eq('partita_iva', azienda.partita_iva).eq('status_processo', 'completed').neq('id_azienda', azienda.id_azienda).limit(1).maybeSingle(); // FIX: maybeSingle() non lancia errore se non trova nulla, single() sì
-        let finalData = {};
-        if (existingData) {
-          console.log(`Cache HIT per ${azienda.partita_iva}`);
-          finalData = existingData;
-        } else {
-          console.log(`Cache MISS per ${azienda.partita_iva} — avvio flusso AI`);
-          // ── STEP 1: Genera query di ricerca ──────────────────────────────
-          const prompt1 = `Genera una stringa di ricerca ottimizzata per Google Search.
-L'obiettivo è trovare un'attività o azienda reale in Italia, per ottenere informazioni come il sito web ufficiale e i dati di contatto.
-Usa solo nome azienda, città, regione, e se disponibile tipo di attività o categoria.
-Non inserire parole come "sito ufficiale", "azienda", "partita IVA" o frasi descrittive.
-Restituisci solo la stringa di ricerca, senza testo aggiuntivo.
-
-Dati disponibili:
-Nome Azienda: ${azienda.nome_azienda}
-Città: ${azienda.comune || ''}
-Regione: ${azienda.regione || ''}
-
-Esempio output desiderato:
-"Libreria Brivio Aosta Valle d'Aosta"`;
-          const searchQuery = (await callOpenRouter("openai/gpt-3.5-turbo", [
-            {
-              role: "user",
-              content: prompt1
-            }
-          ])).replace(/"/g, '');
-          console.log(`Query generata: ${searchQuery}`);
-          // ── STEP 1b: Serper.dev ──────────────────────────────────────────
-          const resSerper = await fetchWithTimeout("https://google.serper.dev/search", {
-            method: "POST",
-            headers: {
-              "X-API-KEY": SERPER_API_KEY,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              q: searchQuery,
-              gl: "it",
-              num: 5
-            })
-          }, 10000);
-          const jsonSerper = await resSerper.json();
-          const url = jsonSerper.organic?.[0]?.link;
-          if (!url) throw new Error(`Sito web non trovato per query: "${searchQuery}"`);
-          console.log(`URL trovato: ${url}`);
-          // ── STEP 2a: Scraping ────────────────────────────────────────────
-          let cleanText = "";
-          try {
-            const resHtml = await fetchWithTimeout(url, {
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-              }
-            }, 10000);
-            if (!resHtml.ok) throw new Error(`HTTP ${resHtml.status}`);
-            const rawHtml = await resHtml.text();
-            cleanText = cleanHtml(rawHtml);
-          } catch (scrapeErr) {
-            // Se lo scraping fallisce non blocchiamo tutto: usiamo i dati Serper come fallback
-            console.warn(`Scraping fallito per ${url}: ${scrapeErr}. Uso snippet Serper.`);
-            cleanText = jsonSerper.organic?.[0]?.snippet || "";
+        return await callOpenRouterSingle(model, messages);
+      } catch (error) {
+        const errorMessage = toErrorMessage(error);
+        errors.push(`[${model}#${attempt}] ${errorMessage}`);
+        const isRetryable = /429|5\d\d|timeout|Provider returned error/i.test(errorMessage);
+        if (attempt < 2 && isRetryable) {
+          await delay(900 * attempt);
+          continue;
+        }
+        break;
+      }
+    }
+  }
+  throw new Error(`Tutti i modelli OpenRouter hanno fallito: ${errors.join(' | ')}`);
+}
+function parseJsonFromAI(raw: string): Record<string, unknown> {
+  const cleaned = raw.replace(new RegExp("```json|```", "g"), "").trim();
+  try {
+    return JSON.parse(cleaned) as Record<string, unknown>;
+  } catch  {
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+      throw new Error('JSON non trovato nella risposta AI');
+    }
+    return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
+  }
+}
+function toSafeString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+function tryDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch  {
+    return value;
+  }
+}
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch  {
+    return false;
+  }
+}
+function extractWebsiteFromSerper(serperPayload: Record<string, unknown>): string {
+  const organicValue = Reflect.get(serperPayload, 'organic');
+  if (!Array.isArray(organicValue)) return '';
+  for (const item of organicValue){
+    if (typeof item !== 'object' || item === null) continue;
+    const link = Reflect.get(item, 'link');
+    if (typeof link === 'string' && isValidHttpUrl(link)) return link;
+  }
+  return '';
+}
+function extractSnippetFromSerper(serperPayload: Record<string, unknown>): string {
+  const organicValue = Reflect.get(serperPayload, 'organic');
+  if (!Array.isArray(organicValue)) return '';
+  for (const item of organicValue){
+    if (typeof item !== 'object' || item === null) continue;
+    const snippet = Reflect.get(item, 'snippet');
+    if (typeof snippet === 'string' && snippet.length > 0) return snippet;
+  }
+  return '';
+}
+function extractWebsiteFromTavily(tavilyPayload: Record<string, unknown>): string {
+  const resultsValue = Reflect.get(tavilyPayload, 'results');
+  if (!Array.isArray(resultsValue)) return '';
+  for (const item of resultsValue){
+    if (typeof item !== 'object' || item === null) continue;
+    const link = Reflect.get(item, 'url');
+    if (typeof link === 'string' && isValidHttpUrl(link)) return link;
+  }
+  return '';
+}
+function extractSnippetFromTavily(tavilyPayload: Record<string, unknown>): string {
+  const resultsValue = Reflect.get(tavilyPayload, 'results');
+  if (!Array.isArray(resultsValue)) return '';
+  for (const item of resultsValue){
+    if (typeof item !== 'object' || item === null) continue;
+    const content = Reflect.get(item, 'content');
+    if (typeof content === 'string' && content.length > 0) {
+      return content.substring(0, 15000);
+    }
+    const rawContent = Reflect.get(item, 'raw_content');
+    if (typeof rawContent === 'string' && rawContent.length > 0) {
+      return rawContent.substring(0, 15000);
+    }
+  }
+  return '';
+}
+function extractWebsiteFromDuckDuckGo(html: string): string {
+  const redirectMatches = html.matchAll(/href="(\/l\/\?[^\"]*uddg=[^\"]+)"/g);
+  for (const match of redirectMatches){
+    const relativeLink = match[1];
+    try {
+      const wrappedUrl = new URL(relativeLink, 'https://duckduckgo.com');
+      const encodedTarget = wrappedUrl.searchParams.get('uddg');
+      if (!encodedTarget) continue;
+      const target = tryDecodeURIComponent(encodedTarget);
+      if (isValidHttpUrl(target)) return target;
+    } catch  {
+    // ignora url non parseabili
+    }
+  }
+  const directMatches = html.matchAll(/<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"/gi);
+  for (const match of directMatches){
+    const href = match[1];
+    if (!href) continue;
+    const decodedHref = tryDecodeURIComponent(href);
+    if (isValidHttpUrl(decodedHref) && !decodedHref.includes('duckduckgo.com')) {
+      return decodedHref;
+    }
+  }
+  return '';
+}
+async function lookupWebsite(searchQuery: string, tavilyApiKey: string | undefined, serperApiKey: string | undefined): Promise<SearchLookupResult> {
+  const warnings: string[] = [];
+  if (tavilyApiKey) {
+    try {
+      const resTavily = await fetchWithTimeout("https://api.tavily.com/search", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          api_key: tavilyApiKey,
+          query: searchQuery,
+          search_depth: 'basic',
+          max_results: 5,
+          include_answer: false,
+          include_images: false
+        })
+      }, 12000);
+      const tavilyRaw = await resTavily.text();
+      if (!resTavily.ok) {
+        warnings.push(`Tavily HTTP ${resTavily.status}`);
+      } else {
+        const jsonTavily = JSON.parse(tavilyRaw) as Record<string, unknown>;
+        const tavilyUrl = extractWebsiteFromTavily(jsonTavily);
+        if (tavilyUrl) {
+          return {
+            url: tavilyUrl,
+            snippet: extractSnippetFromTavily(jsonTavily)
+          };
+        }
+        warnings.push('Tavily without usable results');
+      }
+    } catch (error) {
+      warnings.push(`Tavily request failed: ${toErrorMessage(error)}`);
+    }
+  } else {
+    warnings.push('TAVILY_API_KEY missing');
+  }
+  if (serperApiKey) {
+    try {
+      const resSerper = await fetchWithTimeout("https://google.serper.dev/search", {
+        method: "POST",
+        headers: {
+          "X-API-KEY": serperApiKey,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          q: searchQuery,
+          gl: "it",
+          num: 5
+        })
+      }, 10000);
+      const serperRaw = await resSerper.text();
+      if (!resSerper.ok) {
+        warnings.push(`Serper HTTP ${resSerper.status}`);
+      } else {
+        const jsonSerper = JSON.parse(serperRaw) as Record<string, unknown>;
+        const serperUrl = extractWebsiteFromSerper(jsonSerper);
+        if (serperUrl) {
+          return {
+            url: serperUrl,
+            snippet: extractSnippetFromSerper(jsonSerper)
+          };
+        }
+        warnings.push('Serper without usable results');
+      }
+    } catch (error) {
+      warnings.push(`Serper request failed: ${toErrorMessage(error)}`);
+    }
+  } else {
+    warnings.push('SERPER_API_KEY missing');
+  }
+  const ddgUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(searchQuery)}`;
+  const ddgResponse = await fetchWithTimeout(ddgUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0'
+    }
+  }, 12000);
+  const ddgHtml = await ddgResponse.text();
+  if (!ddgResponse.ok) {
+    throw new Error(`Ricerca fallback fallita (HTTP ${ddgResponse.status}). ${warnings.join(' | ')}`);
+  }
+  const duckUrl = extractWebsiteFromDuckDuckGo(ddgHtml);
+  if (!duckUrl) {
+    throw new Error(`Sito web non trovato per query: "${searchQuery}". ${warnings.join(' | ')}`);
+  }
+  if (warnings.length > 0) {
+    console.warn(`Lookup fallback usato per query "${searchQuery}": ${warnings.join(' | ')}`);
+  }
+  return {
+    url: duckUrl,
+    snippet: ''
+  };
+}
+function buildSearchQuery(azienda: Record<string, unknown>): string {
+  const values = [
+    toSafeString(azienda.nome_azienda),
+    toSafeString(azienda.comune),
+    toSafeString(azienda.regione),
+    'Italia'
+  ];
+  return values.filter((value)=>value.length > 0).join(' ');
+}
+serve(async (req)=>{
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', {
+      headers: corsHeaders
+    });
+  }
+  try {
+    const serperApiKey = SERPER_API_KEY?.trim() || undefined;
+    const tavilyApiKey = TAVILY_API_KEY?.trim() || undefined;
+    const supabaseAdmin = createClient(getRequiredEnv(SUPABASE_URL, 'SUPABASE_URL'), getRequiredEnv(SUPABASE_SERVICE_ROLE_KEY, 'SUPABASE_SERVICE_ROLE_KEY'));
+    let batchSize = DEFAULT_BATCH_SIZE;
+    let maxBatchesPerRun = DEFAULT_MAX_BATCHES_PER_RUN;
+    if (req.method === 'POST') {
+      try {
+        const body = await req.json();
+        if (typeof body === 'object' && body !== null) {
+          const rawBatchSize = Reflect.get(body, 'batch_size');
+          const rawMaxBatches = Reflect.get(body, 'max_batches');
+          if (typeof rawBatchSize === 'number' && rawBatchSize > 0) {
+            batchSize = Math.min(Math.floor(rawBatchSize), 20);
           }
-          // ── STEP 2b: Prompt estrazione contatti — FIX 4: richiede JSON ──
-          const prompt2 = `RUOLO
+          if (typeof rawMaxBatches === 'number' && rawMaxBatches > 0) {
+            maxBatchesPerRun = Math.min(Math.floor(rawMaxBatches), 20);
+          }
+        }
+      } catch  {
+      // body opzionale
+      }
+    }
+    let processed = 0;
+    let failed = 0;
+    for (let batchIndex = 0; batchIndex < maxBatchesPerRun; batchIndex++){
+      const { data: aziende, error: rpcError } = await supabaseAdmin.rpc('get_next_batch_aziende', {
+        batch_size: batchSize
+      });
+      if (rpcError) throw rpcError;
+      if (!aziende || aziende.length === 0) break;
+      for (const azienda of aziende){
+        try {
+          console.log(`Processing: ${azienda.nome_azienda} (${azienda.partita_iva})`);
+          const { data: existingData, error: existingDataError } = await supabaseAdmin.from('aziende').select('website_url, google_search_query, dati_contatto_raw, email_target, email_generata_oggetto, email_generata_corpo').eq('partita_iva', azienda.partita_iva).eq('status_processo', 'completed').neq('id_azienda', azienda.id_azienda).limit(1).maybeSingle();
+          if (existingDataError) {
+            throw existingDataError;
+          }
+          let finalData: Record<string, unknown> = {};
+          if (existingData) {
+            finalData = existingData;
+          } else {
+            const searchQuery = buildSearchQuery(azienda as Record<string, unknown>);
+            let url = '';
+            let cleanText = "";
+            try {
+              const lookupResult = await lookupWebsite(searchQuery, tavilyApiKey, serperApiKey);
+              url = lookupResult.url;
+              try {
+                const resHtml = await fetchWithTimeout(url, {
+                  headers: {
+                    'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+                  }
+                }, 12000);
+                if (!resHtml.ok) throw new Error(`HTTP ${resHtml.status}`);
+                const rawHtml = await resHtml.text();
+                cleanText = cleanHtml(rawHtml);
+              } catch (scrapeErr) {
+                cleanText = lookupResult.snippet;
+                console.warn(`Scraping fallito per ${url}: ${toErrorMessage(scrapeErr)}. Uso snippet fallback.`);
+              }
+            } catch (lookupErr) {
+              console.warn(`Lookup sito fallito per ${searchQuery}: ${toErrorMessage(lookupErr)}. Continuo senza sito.`);
+              cleanText = [
+                `Nome azienda: ${toSafeString(azienda.nome_azienda)}`,
+                `Comune: ${toSafeString(azienda.comune)}`,
+                `Regione: ${toSafeString(azienda.regione)}`,
+                `Indirizzo: ${toSafeString(azienda.indirizzo)}`
+              ].join('\n');
+            }
+            const prompt2 = `RUOLO
 Sei un analista di dati web specializzato nell'estrazione accurata di informazioni aziendali da homepage.
 
 OBIETTIVO
@@ -163,30 +447,32 @@ FORMATO OUTPUT (rispetta esattamente):
 
 CONTENUTO DA ANALIZZARE:
 ${cleanText}`;
-          const contattiRaw = await callOpenRouter("openai/gpt-4o-mini", [
-            {
-              role: "user",
-              content: prompt2
+            const contattiRaw = await callOpenRouter(OPENROUTER_CONTACT_MODELS, [
+              {
+                role: "user",
+                content: prompt2
+              }
+            ]);
+            let contattiParsed: ContactInfo = {
+              info_utili: "",
+              contact_email: "",
+              partita_iva: "",
+              best_contact_url: ""
+            };
+            try {
+              const parsed = parseJsonFromAI(contattiRaw);
+              contattiParsed = {
+                info_utili: toSafeString(parsed.info_utili),
+                contact_email: toSafeString(parsed.contact_email),
+                partita_iva: toSafeString(parsed.partita_iva),
+                best_contact_url: toSafeString(parsed.best_contact_url)
+              };
+            } catch (parseErr) {
+              console.warn(`Parsing JSON contatti fallito: ${toErrorMessage(parseErr)}. Raw: ${contattiRaw}`);
+              const emailMatch = contattiRaw.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+              if (emailMatch) contattiParsed.contact_email = emailMatch[0];
             }
-          ]);
-          // FIX 2+3: Parsing robusto del JSON
-          let contattiParsed = {
-            info_utili: "",
-            contact_email: "",
-            partita_iva: "",
-            best_contact_url: ""
-          };
-          try {
-            contattiParsed = parseJsonFromAI(contattiRaw);
-          } catch (parseErr) {
-            console.warn(`Parsing JSON contatti fallito: ${parseErr}. Raw: ${contattiRaw}`);
-            // Tentiamo estrazione email con regex come fallback
-            const emailMatch = contattiRaw.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-            if (emailMatch) contattiParsed.contact_email = emailMatch[0];
-          }
-          console.log(`Email estratta: ${contattiParsed.contact_email || 'nessuna'}`);
-          // ── STEP 3: Generazione email — FIX 1: prompt completo ──────────
-          const prompt3 = `Sei un assistente esperto nella scrittura di email professionali per conto di Riccardo di Abifin srl.
+            const prompt3 = `Sei un assistente esperto nella scrittura di email professionali per conto di Riccardo di Abifin srl.
 
 OBIETTIVO
 Genera una email commerciale professionale e cortese composta da:
@@ -227,63 +513,75 @@ VINCOLI CRITICI
 OUTPUT RICHIESTO
 Restituisci ESCLUSIVAMENTE un oggetto JSON valido, senza testo aggiuntivo, senza blocchi markdown:
 {"oggetto":"...","corpo":"..."}`;
-          const emailRaw = await callOpenRouter("openai/gpt-4o-mini", [
-            {
-              role: "user",
-              content: prompt3
+            const emailRaw = await callOpenRouter(OPENROUTER_EMAIL_MODELS, [
+              {
+                role: "user",
+                content: prompt3
+              }
+            ]);
+            let emailParsed: EmailContent = {
+              oggetto: "Opportunità di finanza agevolata per la tua azienda",
+              corpo: emailRaw
+            };
+            try {
+              const parsed = parseJsonFromAI(emailRaw);
+              emailParsed = {
+                oggetto: toSafeString(parsed.oggetto) || emailParsed.oggetto,
+                corpo: toSafeString(parsed.corpo) || emailParsed.corpo
+              };
+            } catch (parseErr) {
+              console.warn(`Parsing JSON email fallito: ${toErrorMessage(parseErr)}. Uso testo grezzo.`);
             }
-          ]);
-          // FIX 2: Parsing JSON email
-          let emailOggetto = "Opportunità di finanza agevolata per la tua azienda";
-          let emailCorpo = "";
-          try {
-            const emailParsed = parseJsonFromAI(emailRaw);
-            emailOggetto = emailParsed.oggetto || emailOggetto;
-            emailCorpo = emailParsed.corpo || emailRaw;
-          } catch (parseErr) {
-            console.warn(`Parsing JSON email fallito: ${parseErr}. Uso testo grezzo.`);
-            emailCorpo = emailRaw;
+            finalData = {
+              google_search_query: searchQuery,
+              website_url: url || null,
+              dati_contatto_raw: contattiParsed,
+              email_target: contattiParsed.contact_email || null,
+              email_generata_oggetto: emailParsed.oggetto,
+              email_generata_corpo: emailParsed.corpo
+            };
           }
-          // FIX 9: dati_contatto_raw salva il JSON parsato, non wrappato
-          finalData = {
-            search_query_generated: searchQuery,
-            website_url: url,
-            dati_contatto_raw: contattiParsed,
-            email_target: contattiParsed.contact_email || null,
-            email_generata_oggetto: emailOggetto,
-            email_generata_corpo: emailCorpo
-          };
+          const { error: completeUpdateError } = await supabaseAdmin.from('aziende').update({
+            ...finalData,
+            status_processo: 'completed',
+            log_errori: null,
+            last_processed_at: new Date().toISOString()
+          }).eq('partita_iva', azienda.partita_iva).in('status_processo', [
+            'pending',
+            'processing'
+          ]);
+          if (completeUpdateError) {
+            throw completeUpdateError;
+          }
+          processed += 1;
+        } catch (error) {
+          failed += 1;
+          const message = toErrorMessage(error);
+          console.error(`Errore azienda ${azienda.id_azienda}: ${message}`);
+          const { error: errorUpdateError } = await supabaseAdmin.from('aziende').update({
+            status_processo: 'error',
+            log_errori: message,
+            last_processed_at: new Date().toISOString()
+          }).eq('id_azienda', azienda.id_azienda);
+          if (errorUpdateError) {
+            console.error(`Errore update stato error per azienda ${azienda.id_azienda}: ${errorUpdateError.message}`);
+          }
         }
-        // ── UPDATE MASSIVO (Write Once, Update All) ──────────────────────
-        // FIX 8: filtra solo 'pending' per non sovrascrivere righe in processing
-        await supabaseAdmin.from('aziende').update({
-          ...finalData,
-          status_processo: 'completed',
-          log_errori: null,
-          last_processed_at: new Date().toISOString()
-        }).eq('partita_iva', azienda.partita_iva).in('status_processo', [
-          'pending',
-          'processing'
-        ]); // non tocca 'completed' o 'error' di altri
-      } catch (err) {
-        console.error(`Errore azienda ${azienda.id_azienda}:`, err);
-        await supabaseAdmin.from('aziende').update({
-          status_processo: 'error',
-          log_errori: err instanceof Error ? err.message : String(err),
-          last_processed_at: new Date().toISOString()
-        }).eq('id_azienda', azienda.id_azienda);
       }
     }
     return new Response(JSON.stringify({
       success: true,
-      processed: aziende.length
+      processed,
+      failed,
+      batch_size: batchSize,
+      max_batches: maxBatchesPerRun
     }), {
       headers: corsHeaders
     });
   } catch (error) {
-    console.error("Errore Generale:", error);
+    console.error("Errore Generale:", toErrorMessage(error));
     return new Response(JSON.stringify({
-      error: error instanceof Error ? error.message : String(error)
+      error: toErrorMessage(error)
     }), {
       status: 500,
       headers: corsHeaders

@@ -21,8 +21,8 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
-import { type Azienda } from '../data/schema'
 import { useSendEmail } from '../data/hooks'
+import { type Azienda } from '../data/schema'
 
 type AziendaDetailDrawerProps = {
   azienda: Azienda | null
@@ -95,6 +95,8 @@ export function AziendaDetailDrawer({
   ]
     .filter(Boolean)
     .join(', ')
+  const websiteUrl =
+    typeof azienda.website_url === 'string' ? azienda.website_url : null
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -104,9 +106,7 @@ export function AziendaDetailDrawer({
             <Building2 className='size-5' />
             {azienda.nome_azienda}
           </SheetTitle>
-          <SheetDescription>
-            VAT: {azienda.partita_iva}
-          </SheetDescription>
+          <SheetDescription>VAT: {azienda.partita_iva}</SheetDescription>
         </SheetHeader>
 
         <div className='space-y-6 px-4 pb-6'>
@@ -134,7 +134,7 @@ export function AziendaDetailDrawer({
           </section>
 
           {/* Website */}
-          {azienda.website_url && (
+          {websiteUrl && (
             <>
               <Separator />
               <section className='space-y-2'>
@@ -143,12 +143,12 @@ export function AziendaDetailDrawer({
                   Website Found
                 </h3>
                 <a
-                  href={azienda.website_url}
+                  href={websiteUrl}
                   target='_blank'
                   rel='noopener noreferrer'
                   className='flex items-center gap-1 text-sm text-blue-600 hover:underline dark:text-blue-400'
                 >
-                  {azienda.website_url}
+                  {websiteUrl}
                   <ExternalLink className='size-3' />
                 </a>
               </section>
@@ -170,7 +170,7 @@ export function AziendaDetailDrawer({
           )}
 
           {/* Raw Contact Data */}
-          {azienda.dati_contatto_raw && (
+          {Boolean(azienda.dati_contatto_raw) && (
             <>
               <Separator />
               <section className='space-y-2'>
@@ -248,7 +248,7 @@ export function AziendaDetailDrawer({
                 <h3 className='text-sm font-semibold text-muted-foreground'>
                   AI Search Query
                 </h3>
-                <p className='text-sm italic text-muted-foreground'>
+                <p className='text-sm text-muted-foreground italic'>
                   &ldquo;{azienda.search_query_generated}&rdquo;
                 </p>
               </section>

@@ -26,10 +26,15 @@ import { aziendeColumns as columns } from './aziende-columns'
 
 type AziendeTableProps = {
   data: Azienda[]
+  highlightedRowId?: number | null
   onRowClick?: (azienda: Azienda) => void
 }
 
-export function AziendeTable({ data, onRowClick }: AziendeTableProps) {
+export function AziendeTable({
+  data,
+  highlightedRowId,
+  onRowClick,
+}: AziendeTableProps) {
   const [rowSelection, setRowSelection] = useState({})
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({})
   const [sorting, setSorting] = useState<SortingState>([])
@@ -63,7 +68,7 @@ export function AziendeTable({ data, onRowClick }: AziendeTableProps) {
   })
 
   return (
-    <div className='flex flex-1 flex-col gap-4'>
+    <div className='flex min-h-0 flex-1 flex-col gap-4'>
       <DataTableToolbar
         table={table}
         searchPlaceholder='Filter companies...'
@@ -81,7 +86,7 @@ export function AziendeTable({ data, onRowClick }: AziendeTableProps) {
           },
         ]}
       />
-      <div className='overflow-hidden rounded-md border'>
+      <div className='min-h-0 flex-1 overflow-auto overscroll-contain rounded-md border'>
         <Table>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
@@ -109,30 +114,39 @@ export function AziendeTable({ data, onRowClick }: AziendeTableProps) {
           </TableHeader>
           <TableBody>
             {table.getRowModel().rows?.length ? (
-              table.getRowModel().rows.map((row) => (
-                <TableRow
-                  key={row.id}
-                  data-state={row.getIsSelected() && 'selected'}
-                  className='group/row cursor-pointer'
-                  onClick={() => onRowClick?.(row.original)}
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell
-                      key={cell.id}
-                      className={cn(
-                        'bg-background group-hover/row:bg-muted group-data-[state=selected]/row:bg-muted',
-                        cell.column.columnDef.meta?.className,
-                        cell.column.columnDef.meta?.tdClassName
-                      )}
-                    >
-                      {flexRender(
-                        cell.column.columnDef.cell,
-                        cell.getContext()
-                      )}
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))
+              table.getRowModel().rows.map((row) => {
+                const isHighlighted =
+                  row.original.id_azienda === highlightedRowId
+
+                return (
+                  <TableRow
+                    key={row.id}
+                    data-state={row.getIsSelected() && 'selected'}
+                    className='group/row cursor-pointer'
+                    onClick={() => onRowClick?.(row.original)}
+                  >
+                    {row.getVisibleCells().map((cell) => (
+                      <TableCell
+                        key={cell.id}
+                        className={cn(
+                          'transition-colors duration-500',
+                          isHighlighted
+                            ? 'bg-blue-50/80 dark:bg-blue-950/40'
+                            : 'bg-background',
+                          'group-hover/row:bg-muted group-data-[state=selected]/row:bg-muted',
+                          cell.column.columnDef.meta?.className,
+                          cell.column.columnDef.meta?.tdClassName
+                        )}
+                      >
+                        {flexRender(
+                          cell.column.columnDef.cell,
+                          cell.getContext()
+                        )}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                )
+              })
             ) : (
               <TableRow>
                 <TableCell

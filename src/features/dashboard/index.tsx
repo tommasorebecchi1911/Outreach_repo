@@ -1,26 +1,27 @@
-import {
-  Building2,
-  CheckCircle2,
-  Clock,
-  Loader2,
-  Mail,
-} from 'lucide-react'
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { Building2, CheckCircle2, Clock, Loader2, Mail } from 'lucide-react'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { AnimatedNumber } from '@/components/animated-number'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { ProfileDropdown } from '@/components/profile-dropdown'
 import { Search } from '@/components/search'
 import { ThemeSwitch } from '@/components/theme-switch'
-import { useAziendaStats } from '@/features/aziende/data/hooks'
+import {
+  useAziendaStats,
+  useAziendeRealtime,
+} from '@/features/aziende/data/hooks'
 import { Overview } from './components/overview'
 
 export function Dashboard() {
   const { data: stats, isLoading } = useAziendaStats()
+  const { isSubscribed } = useAziendeRealtime()
+  const totalCompanies = stats?.total ?? 0
+  const pendingCompanies = stats?.pending ?? 0
+  const processingCompanies = stats?.processing ?? 0
+  const completedCompanies = stats?.completed ?? 0
+  const errorCompanies = stats?.error ?? 0
+  const emailsSent = stats?.emailsSent ?? 0
+  const processingQueue = pendingCompanies + processingCompanies
 
   return (
     <>
@@ -38,6 +39,14 @@ export function Dashboard() {
           <p className='text-muted-foreground'>
             Overview of your company enrichment pipeline.
           </p>
+          <div className='mt-2 inline-flex items-center gap-2 text-xs text-muted-foreground'>
+            <span
+              className={`size-2 rounded-full ${isSubscribed ? 'animate-pulse bg-emerald-500' : 'bg-amber-500'}`}
+            />
+            {isSubscribed
+              ? 'Live updates enabled'
+              : 'Connecting to live updates...'}
+          </div>
         </div>
 
         {isLoading ? (
@@ -55,9 +64,10 @@ export function Dashboard() {
                   <Building2 className='h-4 w-4 text-muted-foreground' />
                 </CardHeader>
                 <CardContent>
-                  <div className='text-2xl font-bold'>
-                    {stats?.total ?? 0}
-                  </div>
+                  <AnimatedNumber
+                    value={totalCompanies}
+                    className='block text-2xl font-bold'
+                  />
                   <p className='text-xs text-muted-foreground'>
                     imported from Excel files
                   </p>
@@ -71,12 +81,12 @@ export function Dashboard() {
                   <Clock className='h-4 w-4 text-muted-foreground' />
                 </CardHeader>
                 <CardContent>
-                  <div className='text-2xl font-bold'>
-                    {(stats?.pending ?? 0) + (stats?.processing ?? 0)}
-                  </div>
+                  <AnimatedNumber
+                    value={processingQueue}
+                    className='block text-2xl font-bold'
+                  />
                   <p className='text-xs text-muted-foreground'>
-                    {stats?.pending ?? 0} pending, {stats?.processing ?? 0}{' '}
-                    processing
+                    {pendingCompanies} pending, {processingCompanies} processing
                   </p>
                 </CardContent>
               </Card>
@@ -88,9 +98,10 @@ export function Dashboard() {
                   <CheckCircle2 className='h-4 w-4 text-muted-foreground' />
                 </CardHeader>
                 <CardContent>
-                  <div className='text-2xl font-bold text-green-600'>
-                    {stats?.completed ?? 0}
-                  </div>
+                  <AnimatedNumber
+                    value={completedCompanies}
+                    className='block text-2xl font-bold text-green-600'
+                  />
                   <p className='text-xs text-muted-foreground'>
                     enriched with AI data
                   </p>
@@ -104,9 +115,10 @@ export function Dashboard() {
                   <Mail className='h-4 w-4 text-muted-foreground' />
                 </CardHeader>
                 <CardContent>
-                  <div className='text-2xl font-bold text-blue-600'>
-                    {stats?.emailsSent ?? 0}
-                  </div>
+                  <AnimatedNumber
+                    value={emailsSent}
+                    className='block text-2xl font-bold text-blue-600'
+                  />
                   <p className='text-xs text-muted-foreground'>
                     delivered via Resend
                   </p>
@@ -131,27 +143,31 @@ export function Dashboard() {
                   <div className='space-y-4'>
                     <StatusBar
                       label='Pending'
-                      value={stats?.pending ?? 0}
-                      total={stats?.total ?? 1}
+                      value={pendingCompanies}
+                      total={Math.max(totalCompanies, 1)}
                       color='bg-yellow-500'
+                      textColor='text-yellow-700 dark:text-yellow-400'
                     />
                     <StatusBar
                       label='Processing'
-                      value={stats?.processing ?? 0}
-                      total={stats?.total ?? 1}
+                      value={processingCompanies}
+                      total={Math.max(totalCompanies, 1)}
                       color='bg-blue-500'
+                      textColor='text-blue-700 dark:text-blue-400'
                     />
                     <StatusBar
                       label='Completed'
-                      value={stats?.completed ?? 0}
-                      total={stats?.total ?? 1}
+                      value={completedCompanies}
+                      total={Math.max(totalCompanies, 1)}
                       color='bg-green-500'
+                      textColor='text-green-700 dark:text-green-400'
                     />
                     <StatusBar
                       label='Error'
-                      value={stats?.error ?? 0}
-                      total={stats?.total ?? 1}
+                      value={errorCompanies}
+                      total={Math.max(totalCompanies, 1)}
                       color='bg-red-500'
+                      textColor='text-red-700 dark:text-red-400'
                     />
                   </div>
                 </CardContent>
@@ -169,25 +185,32 @@ function StatusBar({
   value,
   total,
   color,
+  textColor,
 }: {
   label: string
   value: number
   total: number
   color: string
+  textColor: string
 }) {
-  const percentage = total > 0 ? Math.round((value / total) * 100) : 0
+  const percentage = total > 0 ? (value / total) * 100 : 0
+  const clampedPercentage = Math.min(100, Math.max(0, percentage))
+  const percentageLabel = Number.isInteger(clampedPercentage)
+    ? clampedPercentage.toString()
+    : clampedPercentage.toFixed(1)
+
   return (
     <div className='space-y-1'>
       <div className='flex items-center justify-between text-sm'>
-        <span className='text-muted-foreground'>{label}</span>
-        <span className='font-medium tabular-nums'>
-          {value} ({percentage}%)
+        <span className={`font-medium ${textColor}`}>{label}</span>
+        <span className={`font-medium tabular-nums ${textColor}`}>
+          <AnimatedNumber value={value} /> ({percentageLabel}%)
         </span>
       </div>
       <div className='h-2 w-full rounded-full bg-muted'>
         <div
-          className={`h-2 rounded-full ${color}`}
-          style={{ width: `${percentage}%` }}
+          className={`h-2 rounded-full transition-[width] duration-500 ease-out ${color}`}
+          style={{ width: `${clampedPercentage}%` }}
         />
       </div>
     </div>

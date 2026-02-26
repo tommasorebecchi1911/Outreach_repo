@@ -1,12 +1,7 @@
-import { useState } from 'react'
-import {
-  CheckCircle2,
-  ExternalLink,
-  Loader2,
-  Mail,
-  Send,
-} from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { CheckCircle2, ExternalLink, Loader2, Mail, Send } from 'lucide-react'
 import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -17,20 +12,43 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
+import { AnimatedNumber } from '@/components/animated-number'
 import { Header } from '@/components/layout/header'
 import { Main } from '@/components/layout/main'
 import { ProfileDropdown } from '@/components/profile-dropdown'
 import { Search } from '@/components/search'
 import { ThemeSwitch } from '@/components/theme-switch'
-import { useAziende, useSendEmail } from '@/features/aziende/data/hooks'
+import {
+  useAziende,
+  useAziendeRealtime,
+  useSendEmail,
+} from '@/features/aziende/data/hooks'
 import { type Azienda } from '@/features/aziende/data/schema'
 
 export function Emails() {
-  const { data: aziende, isLoading, refetch } = useAziende()
-
-  const companiesWithEmails = (aziende ?? []).filter(
-    (a) => a.email_generata_oggetto && a.email_generata_corpo
+  const { data: aziende, isLoading } = useAziende()
+  const { isSubscribed, lastEvent } = useAziendeRealtime()
+  const [highlightedEmailId, setHighlightedEmailId] = useState<number | null>(
+    null
   )
+
+  useEffect(() => {
+    if (lastEvent?.id == null) return
+
+    setHighlightedEmailId(lastEvent.id)
+    const timeoutId = window.setTimeout(() => {
+      setHighlightedEmailId(null)
+    }, 1800)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [lastEvent?.at, lastEvent?.id])
+
+  const companiesWithEmails = (aziende ?? []).filter((azienda) => {
+    const targetEmail = azienda.email_target?.trim() ?? ''
+    return targetEmail.length > 0
+  })
 
   const sent = companiesWithEmails.filter((a) => a.email_inviata)
   const notSent = companiesWithEmails.filter((a) => !a.email_inviata)
@@ -51,6 +69,14 @@ export function Emails() {
           <p className='text-muted-foreground'>
             View AI-generated emails and send them to company contacts.
           </p>
+          <div className='mt-2 inline-flex items-center gap-2 text-xs text-muted-foreground'>
+            <span
+              className={`size-2 rounded-full ${isSubscribed ? 'animate-pulse bg-emerald-500' : 'bg-amber-500'}`}
+            />
+            {isSubscribed
+              ? 'Live updates enabled'
+              : 'Connecting to live updates...'}
+          </div>
         </div>
 
         <div className='mb-6 grid gap-4 sm:grid-cols-3'>
@@ -61,9 +87,10 @@ export function Emails() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className='text-2xl font-bold'>
-                {companiesWithEmails.length}
-              </div>
+              <AnimatedNumber
+                value={companiesWithEmails.length}
+                className='block text-2xl font-bold'
+              />
             </CardContent>
           </Card>
           <Card>
@@ -71,9 +98,10 @@ export function Emails() {
               <CardTitle className='text-sm font-medium'>Sent</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className='text-2xl font-bold text-green-600'>
-                {sent.length}
-              </div>
+              <AnimatedNumber
+                value={sent.length}
+                className='block text-2xl font-bold text-green-600'
+              />
             </CardContent>
           </Card>
           <Card>
@@ -83,9 +111,10 @@ export function Emails() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className='text-2xl font-bold text-blue-600'>
-                {notSent.length}
-              </div>
+              <AnimatedNumber
+                value={notSent.length}
+                className='block text-2xl font-bold text-blue-600'
+              />
             </CardContent>
           </Card>
         </div>
@@ -115,7 +144,7 @@ export function Emails() {
                     <EmailCard
                       key={azienda.id_azienda}
                       azienda={azienda}
-                      onSent={() => refetch()}
+                      isHighlighted={highlightedEmailId === azienda.id_azienda}
                     />
                   ))}
                 </div>
@@ -130,7 +159,7 @@ export function Emails() {
                     <EmailCard
                       key={azienda.id_azienda}
                       azienda={azienda}
-                      onSent={() => refetch()}
+                      isHighlighted={highlightedEmailId === azienda.id_azienda}
                     />
                   ))}
                 </div>
@@ -145,10 +174,10 @@ export function Emails() {
 
 function EmailCard({
   azienda,
-  onSent,
+  isHighlighted,
 }: {
   azienda: Azienda
-  onSent: () => void
+  isHighlighted?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
   const sendEmail = useSendEmail(azienda.id_azienda)
@@ -157,20 +186,23 @@ function EmailCard({
     try {
       await sendEmail.mutateAsync()
       toast.success(`Email sent to ${azienda.email_target}`)
-      onSent()
     } catch {
       toast.error('Failed to send email')
     }
   }
 
   return (
-    <Card>
+    <Card
+      className={cn(
+        'animate-in transition-all duration-500 fade-in-0 slide-in-from-bottom-2',
+        isHighlighted &&
+          'shadow-md ring-2 ring-emerald-300 dark:ring-emerald-700'
+      )}
+    >
       <CardHeader className='pb-3'>
         <div className='flex items-start justify-between gap-4'>
           <div className='min-w-0 flex-1'>
-            <CardTitle className='text-base'>
-              {azienda.nome_azienda}
-            </CardTitle>
+            <CardTitle className='text-base'>{azienda.nome_azienda}</CardTitle>
             <CardDescription className='flex items-center gap-2'>
               <span>To: {azienda.email_target ?? 'N/A'}</span>
               {azienda.website_url && (
@@ -231,11 +263,7 @@ function EmailCard({
             </Button>
           </>
         ) : (
-          <Button
-            variant='ghost'
-            size='sm'
-            onClick={() => setExpanded(true)}
-          >
+          <Button variant='ghost' size='sm' onClick={() => setExpanded(true)}>
             Show email body
           </Button>
         )}

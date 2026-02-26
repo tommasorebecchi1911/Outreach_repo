@@ -178,6 +178,152 @@ function isValidHttpUrl(value: string): boolean {
     return false;
   }
 }
+const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const EMAIL_VALIDATION_REGEX = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+const CONTACT_PATH_HINTS = [
+  'contact',
+  'contatti',
+  'chi-siamo',
+  'about',
+  'azienda'
+];
+const EMAIL_LOCAL_PREFERENCE = [
+  'info',
+  'contatti',
+  'contact',
+  'hello',
+  'commerciale',
+  'sales',
+  'amministrazione',
+  'support',
+  'supporto'
+];
+const BLOCKED_EMAIL_PREFIXES = [
+  'noreply',
+  'no-reply',
+  'donotreply',
+  'do-not-reply'
+];
+function sanitizeEmailCandidate(value: string): string {
+  return value.trim().replace(/^[<\("'\s]+|[>\),;:"'\s]+$/g, '').toLowerCase();
+}
+function isLikelyContactEmail(value: string): boolean {
+  const email = sanitizeEmailCandidate(value);
+  if (!email || !EMAIL_VALIDATION_REGEX.test(email)) return false;
+  if (!email.includes('@')) return false;
+  if (email.includes('&#')) return false;
+  if (email.length > 120) return false;
+  if (email.includes('example.com')) return false;
+  if (email.includes('localhost')) return false;
+  if (/\.(png|jpg|jpeg|gif|webp|svg|css|js)$/i.test(email)) return false;
+  const localPart = email.split('@')[0] ?? '';
+  if (BLOCKED_EMAIL_PREFIXES.some((prefix)=>localPart.startsWith(prefix))) {
+    return false;
+  }
+  return true;
+}
+function extractEmailsFromText(text: string): string[] {
+  if (!text) return [];
+  const matches = text.match(EMAIL_REGEX) ?? [];
+  EMAIL_REGEX.lastIndex = 0;
+  const unique = new Set<string>();
+  for (const match of matches){
+    const cleaned = sanitizeEmailCandidate(match);
+    if (isLikelyContactEmail(cleaned)) unique.add(cleaned);
+  }
+  return Array.from(unique);
+}
+function normalizeCandidateUrl(value: string, baseUrl = ''): string {
+  const candidate = value.trim();
+  if (!candidate) return '';
+  if (candidate.startsWith('mailto:')) return '';
+  if (candidate.startsWith('//')) {
+    return `https:${candidate}`;
+  }
+  if (isValidHttpUrl(candidate)) return candidate;
+  if (baseUrl) {
+    try {
+      return new URL(candidate, baseUrl).href;
+    } catch  {
+    // ignora url non parseabili
+    }
+  }
+  if (/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/.*)?$/.test(candidate)) {
+    return `https://${candidate}`;
+  }
+  return '';
+}
+function extractEmailsFromHtml(html: string): string[] {
+  if (!html) return [];
+  const emails = new Set<string>();
+  const cloudflareMatches = html.matchAll(/data-cfemail=["']([a-fA-F0-9]+)["']/g);
+  for (const match of cloudflareMatches){
+    const encoded = toSafeString(match[1]);
+    if (!encoded || encoded.length < 4 || encoded.length % 2 !== 0) continue;
+    try {
+      const key = Number.parseInt(encoded.slice(0, 2), 16);
+      let decoded = '';
+      for (let index = 2; index < encoded.length; index += 2){
+        const value = Number.parseInt(encoded.slice(index, index + 2), 16) ^ key;
+        decoded += String.fromCharCode(value);
+      }
+      const email = sanitizeEmailCandidate(decoded);
+      if (isLikelyContactEmail(email)) emails.add(email);
+    } catch  {
+    // ignora data-cfemail invalidi
+    }
+  }
+  const mailtoMatches = html.matchAll(/href=["']mailto:([^"'#?]+)[^"']*["']/gi);
+  for (const match of mailtoMatches){
+    const email = sanitizeEmailCandidate(match[1] ?? '');
+    if (isLikelyContactEmail(email)) emails.add(email);
+  }
+  for (const email of extractEmailsFromText(html)){
+    emails.add(email);
+  }
+  return Array.from(emails);
+}
+function extractContactPageCandidates(html: string, baseUrl: string): string[] {
+  if (!html || !baseUrl) return [];
+  const candidates = new Set<string>();
+  const hrefMatches = html.matchAll(/href=["']([^"']+)["']/gi);
+  for (const match of hrefMatches){
+    const href = toSafeString(match[1]);
+    if (!href) continue;
+    const lowerHref = href.toLowerCase();
+    if (!CONTACT_PATH_HINTS.some((hint)=>lowerHref.includes(hint))) continue;
+    const normalized = normalizeCandidateUrl(href, baseUrl);
+    if (normalized) candidates.add(normalized);
+  }
+  return Array.from(candidates);
+}
+function getUrlHostname(value: string): string {
+  if (!isValidHttpUrl(value)) return '';
+  try {
+    return new URL(value).hostname.replace(/^www\./, '').toLowerCase();
+  } catch  {
+    return '';
+  }
+}
+function scoreEmailCandidate(email: string, websiteUrl: string): number {
+  const sanitized = sanitizeEmailCandidate(email);
+  if (!isLikelyContactEmail(sanitized)) return -100;
+  const host = getUrlHostname(websiteUrl);
+  const domain = sanitized.split('@')[1] ?? '';
+  const localPart = sanitized.split('@')[0] ?? '';
+  let score = 0;
+  if (host && domain.endsWith(host)) score += 3;
+  if (EMAIL_LOCAL_PREFERENCE.some((prefix)=>localPart.startsWith(prefix))) score += 2;
+  if (localPart.length <= 2) score -= 1;
+  return score;
+}
+function pickBestEmail(candidates: string[], websiteUrl: string): string {
+  if (!candidates.length) return '';
+  const unique = Array.from(new Set(candidates.map((candidate)=>sanitizeEmailCandidate(candidate)).filter((candidate)=>isLikelyContactEmail(candidate))));
+  if (!unique.length) return '';
+  unique.sort((left, right)=>scoreEmailCandidate(right, websiteUrl) - scoreEmailCandidate(left, websiteUrl));
+  return unique[0] ?? '';
+}
 function extractWebsiteFromSerper(serperPayload: Record<string, unknown>): string {
   const organicValue = Reflect.get(serperPayload, 'organic');
   if (!Array.isArray(organicValue)) return '';
@@ -392,17 +538,20 @@ serve(async (req)=>{
       for (const azienda of aziende){
         try {
           console.log(`Processing: ${azienda.nome_azienda} (${azienda.partita_iva})`);
-          const { data: existingData, error: existingDataError } = await supabaseAdmin.from('aziende').select('website_url, google_search_query, dati_contatto_raw, email_target, email_generata_oggetto, email_generata_corpo').eq('partita_iva', azienda.partita_iva).eq('status_processo', 'completed').neq('id_azienda', azienda.id_azienda).limit(1).maybeSingle();
+          const { data: existingData, error: existingDataError } = await supabaseAdmin.from('aziende').select('website_url, google_search_query, dati_contatto_raw, email_target, email_generata_oggetto, email_generata_corpo, contact_page_url, info_utili').eq('partita_iva', azienda.partita_iva).eq('status_processo', 'completed').neq('id_azienda', azienda.id_azienda).limit(1).maybeSingle();
           if (existingDataError) {
             throw existingDataError;
           }
           let finalData: Record<string, unknown> = {};
-          if (existingData) {
+          if (existingData && toSafeString(existingData.email_target)) {
             finalData = existingData;
           } else {
             const searchQuery = buildSearchQuery(azienda as Record<string, unknown>);
             let url = '';
+            let rawHtml = '';
             let cleanText = "";
+            const emailCandidates = new Set<string>();
+            const contactPageCandidates = new Set<string>();
             try {
               const lookupResult = await lookupWebsite(searchQuery, tavilyApiKey, serperApiKey);
               url = lookupResult.url;
@@ -413,10 +562,22 @@ serve(async (req)=>{
                   }
                 }, 12000);
                 if (!resHtml.ok) throw new Error(`HTTP ${resHtml.status}`);
-                const rawHtml = await resHtml.text();
+                rawHtml = await resHtml.text();
                 cleanText = cleanHtml(rawHtml);
+                for (const email of extractEmailsFromHtml(rawHtml)){
+                  emailCandidates.add(email);
+                }
+                for (const email of extractEmailsFromText(cleanText)){
+                  emailCandidates.add(email);
+                }
+                for (const candidateUrl of extractContactPageCandidates(rawHtml, url)){
+                  contactPageCandidates.add(candidateUrl);
+                }
               } catch (scrapeErr) {
                 cleanText = lookupResult.snippet;
+                for (const email of extractEmailsFromText(cleanText)){
+                  emailCandidates.add(email);
+                }
                 console.warn(`Scraping fallito per ${url}: ${toErrorMessage(scrapeErr)}. Uso snippet fallback.`);
               }
             } catch (lookupErr) {
@@ -471,6 +632,51 @@ ${cleanText}`;
               console.warn(`Parsing JSON contatti fallito: ${toErrorMessage(parseErr)}. Raw: ${contattiRaw}`);
               const emailMatch = contattiRaw.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
               if (emailMatch) contattiParsed.contact_email = emailMatch[0];
+            }
+            for (const email of extractEmailsFromText(contattiRaw)){
+              emailCandidates.add(email);
+            }
+            if (contattiParsed.contact_email) {
+              emailCandidates.add(contattiParsed.contact_email);
+            }
+            const aiContactUrl = normalizeCandidateUrl(contattiParsed.best_contact_url, url);
+            if (aiContactUrl) {
+              contactPageCandidates.add(aiContactUrl);
+            }
+            let contactPageUrl = aiContactUrl;
+            if (emailCandidates.size === 0 && contactPageCandidates.size > 0) {
+              for (const candidateUrl of Array.from(contactPageCandidates).slice(0, 2)){
+                try {
+                  const contactRes = await fetchWithTimeout(candidateUrl, {
+                    headers: {
+                      'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+                    }
+                  }, 12000);
+                  if (!contactRes.ok) {
+                    console.warn(`Pagina contatti non raggiungibile (${candidateUrl}): HTTP ${contactRes.status}`);
+                    continue;
+                  }
+                  const contactHtml = await contactRes.text();
+                  const extractedFromContact = extractEmailsFromHtml(contactHtml);
+                  for (const email of extractedFromContact){
+                    emailCandidates.add(email);
+                  }
+                  if (extractedFromContact.length > 0) {
+                    contactPageUrl = candidateUrl;
+                    break;
+                  }
+                } catch (contactErr) {
+                  console.warn(`Scraping pagina contatti fallito (${candidateUrl}): ${toErrorMessage(contactErr)}`);
+                }
+              }
+            }
+            const bestEmail = pickBestEmail([
+              contattiParsed.contact_email,
+              ...Array.from(emailCandidates)
+            ], url);
+            contattiParsed.contact_email = bestEmail;
+            if (!contactPageUrl && contactPageCandidates.size > 0) {
+              contactPageUrl = Array.from(contactPageCandidates)[0] ?? '';
             }
             const prompt3 = `Sei un assistente esperto nella scrittura di email professionali per conto di Riccardo di Abifin srl.
 
@@ -538,7 +744,9 @@ Restituisci ESCLUSIVAMENTE un oggetto JSON valido, senza testo aggiuntivo, senza
               dati_contatto_raw: contattiParsed,
               email_target: contattiParsed.contact_email || null,
               email_generata_oggetto: emailParsed.oggetto,
-              email_generata_corpo: emailParsed.corpo
+              email_generata_corpo: emailParsed.corpo,
+              contact_page_url: contactPageUrl || null,
+              info_utili: contattiParsed.info_utili || null
             };
           }
           const { error: completeUpdateError } = await supabaseAdmin.from('aziende').update({

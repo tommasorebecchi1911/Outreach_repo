@@ -139,15 +139,29 @@ export function useUploadExcel() {
 
   return useMutation({
     mutationFn: async (file: File) => {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) throw new Error('User not authenticated')
+
       const formData = new FormData()
       formData.append('file', file)
 
-      const { data, error } = await supabase.functions.invoke('upload-excel', {
-        body: formData,
-      })
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+      const response = await fetch(
+        `${supabaseUrl}/functions/v1/upload-excel`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+            apikey: supabaseAnonKey,
+          },
+          body: formData,
+        }
+      )
 
-      if (error) throw error
-      return data
+      const result = await response.json()
+      if (!response.ok) throw new Error(result.error ?? 'Upload failed')
+      return result
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: aziendeKeys.all })

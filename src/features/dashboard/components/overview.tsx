@@ -37,12 +37,39 @@ export function Overview() {
           axisLine={false}
           allowDecimals={false}
         />
-        <Tooltip />
+        <Tooltip
+          cursor={{ fill: 'var(--muted)', opacity: 0.25 }}
+          content={({ active, payload }) => {
+            if (!active || !payload?.length) {
+              return null
+            }
+
+            const { name, count } = payload[0].payload as {
+              name: string
+              count: number
+            }
+
+            return (
+              <div className='rounded-md border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-md'>
+                <p className='font-medium'>
+                  {name}: <span className='tabular-nums'>{count}</span>
+                </p>
+              </div>
+            )
+          }}
+        />
         <Bar
           dataKey='count'
-          fill='currentColor'
+          fill='var(--primary)'
+          fillOpacity={0.75}
           radius={[4, 4, 0, 0]}
-          className='fill-primary'
+          activeBar={{
+            fill: 'var(--primary)',
+            fillOpacity: 1,
+            stroke: 'var(--ring)',
+            strokeWidth: 1,
+          }}
+          className='cursor-pointer'
         />
       </BarChart>
     </ResponsiveContainer>

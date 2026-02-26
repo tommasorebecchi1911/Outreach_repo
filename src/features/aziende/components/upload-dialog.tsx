@@ -63,8 +63,10 @@ export function UploadDialog({ open, onOpenChange }: UploadDialogProps) {
       toast.success('File uploaded successfully! Companies are being processed.')
       setFile(null)
       onOpenChange(false)
-    } catch {
-      toast.error('Failed to upload file. Please try again.')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Upload failed'
+      console.error('Upload error:', message)
+      toast.error(message)
     }
   }
 

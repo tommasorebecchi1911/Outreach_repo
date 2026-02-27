@@ -1,0 +1,2 @@
+[functions.process-batch]
+verify_jwt = false

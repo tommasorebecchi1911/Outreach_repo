@@ -206,6 +206,36 @@ export function useSendEmail(idAzienda: number) {
 }
 
 /**
+ * Updates generated email subject/body for a specific company.
+ */
+export function useUpdateGeneratedEmail(idAzienda: number) {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({
+      subject,
+      body,
+    }: {
+      subject: string
+      body: string
+    }) => {
+      const { error } = await supabase
+        .from('aziende')
+        .update({
+          email_generata_oggetto: subject,
+          email_generata_corpo: body,
+        })
+        .eq('id_azienda', idAzienda)
+
+      if (error) throw error
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: aziendeKeys.all })
+    },
+  })
+}
+
+/**
  * Re-queues selected aziende to retry contact email discovery.
  * Sets status back to pending and clears processing errors.
  */

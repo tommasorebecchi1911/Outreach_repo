@@ -153,12 +153,20 @@ ALTER FUNCTION "public"."get_next_batch_aziende"("batch_size" integer) OWNER TO 
 CREATE OR REPLACE FUNCTION "public"."trigger_process_batch"() RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
+DECLARE
+  supabase_url text := current_setting('app.settings.supabase_url', true);
+  service_role_key text := current_setting('app.settings.service_role_key', true);
 BEGIN
+  IF coalesce(supabase_url, '') = '' OR coalesce(service_role_key, '') = '' THEN
+    RAISE WARNING 'Missing app.settings.supabase_url or app.settings.service_role_key';
+    RETURN;
+  END IF;
+
   PERFORM net.http_post(
-    url := 'https://rafqtnyehkwwnglovpkq.supabase.co/functions/v1/process-batch',
+    url := supabase_url || '/functions/v1/process-batch',
     headers := jsonb_build_object(
       'Content-Type', 'application/json',
-      'Authorization', 'Bearer ' || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJhZnF0bnllaGt3d25nbG92cGtxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MjAxMjY3MCwiZXhwIjoyMDg3NTg4NjcwfQ.lPRWtuC9capj87EWjilsHf8i-W2qXGc7yFZRrtAMVFU'
+      'Authorization', 'Bearer ' || service_role_key
     ),
     body := '{}'::jsonb
   );
@@ -585,5 +593,4 @@ drop extension if exists "pg_net";
 create extension if not exists "pg_net" with schema "public";
 
 CREATE TRIGGER on_auth_user_created AFTER INSERT ON auth.users FOR EACH ROW EXECUTE FUNCTION public.crea_profilo_utente();
-
 
